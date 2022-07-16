@@ -227,7 +227,8 @@ def main():
             # Buy the bond if the fair_value < 1000
             if message["symbol"] == "BOND":
                 maybe_trade_symbol(message, exchange, message["symbol"])
-
+            if message["symbol"] == "VALE":
+                maybe_trade_symbol(message, exchange, message["symbol"])
 
 
 # ~~~~~============== PROVIDED CODE ==============~~~~~
