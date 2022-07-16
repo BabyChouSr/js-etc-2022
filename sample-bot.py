@@ -27,6 +27,9 @@ team_name = "PILEPERCH"
 # before it will start making good trades!
 
 symbol_dict = {}
+global_variables = {
+    "order_id" : 0
+}
 position_dict = {
     "BOND" : 0,
     "VALBZ" : 0,
@@ -36,7 +39,6 @@ position_dict = {
     "WFC" : 0,
     "XLF" : 0
 } # symbols : shares
-bond_fair_value = 1000
 risk_limit_dict = {
     "BOND" : 100, 
     "VALBZ" : 10,
@@ -47,9 +49,21 @@ risk_limit_dict = {
     "XLF" : 100
 }
 
+def maybe_print_new_symbol_data(now, symbol, best_buy_price, best_sell_price):
+    symbol_last_print_time = symbol_dict[symbol]["ts"] if symbol in symbol_dict else 0 
+    if now > symbol_last_print_time + 1:
+        symbol_last_print_time = now
+        print(
+            {
+                symbol + "_best_buy_price": best_buy_price,
+                symbol + "_best_sell_price": best_sell_price,
+            }
+        )
+
 def update_symbol_dict(symbol, best_buy_price, best_sell_price, fair_value, best_buy_price_size, best_sell_price_size):
     now = time.time()
     if symbol not in symbol_dict:
+        maybe_print_new_symbol_data(now, symbol, best_buy_price, best_sell_price)
         symbol_dict[symbol] = {
             "best_buy_price": best_buy_price, 
             "best_sell_price": best_sell_price, 
@@ -59,22 +73,13 @@ def update_symbol_dict(symbol, best_buy_price, best_sell_price, fair_value, best
             'best_sell_price_size' : best_sell_price_size
             }
     else:
+        maybe_print_new_symbol_data(now, symbol, best_buy_price, best_sell_price)
         symbol_dict[symbol]["ts"] = now
         symbol_dict[symbol]["best_buy_price"] = best_buy_price
         symbol_dict[symbol]["best_sell_price"] = best_sell_price
         symbol_dict[symbol]["fair_value"] = fair_value
         symbol_dict[symbol]["best_buy_price_size"] = best_buy_price_size
         symbol_dict[symbol]["best_sell_price_size"] = best_sell_price_size
-
-    symbol_last_print_time = symbol_dict[symbol]["ts"] if symbol_dict[symbol]["ts"] else 0 
-    if now > symbol_last_print_time + 1:
-        symbol_last_print_time = now
-        print(
-            {
-                symbol + "_best_buy_price": best_buy_price,
-                symbol + "_best_sell_price": best_sell_price,
-            }
-        )
     
 
 def update_symbol_dict_with_message(message):
@@ -85,18 +90,59 @@ def update_symbol_dict_with_message(message):
         if message[side]:
             return message[side][0][1]
 
-    fair_value = (best_price("buy") + best_price("sell")) / 2 if best_price("buy") and best_price("sell") else best_price("buy") or best_price("sell")
     best_buy_price = best_price("buy")
     best_sell_price = best_price("sell")
     best_buy_price_size = best_price_size("buy")
     best_sell_price_size = best_price_size("sell")
+    fair_value = calculate_fair_value(message, best_buy_price, best_sell_price)
     update_symbol_dict(message['symbol'], best_buy_price, best_sell_price, fair_value, best_buy_price_size, best_sell_price_size)
 
 def getCurrentBuyPrice(best_sell_price, fair_value):
-    return (best_sell_price + fair_value) / 2 if best_sell_price else None
+    if best_sell_price is None:
+        return None
+    curr_buy_price = best_sell_price + 1
+    if curr_buy_price >= fair_value:
+        return None
+    return curr_buy_price
 
 def getCurrentSellPrice(best_buy_price, fair_value):
-    return (best_buy_price + fair_value) / 2 if best_buy_price else None
+    if best_buy_price is None:
+        return None
+    curr_sell_price = best_buy_price - 1
+    if curr_sell_price <= fair_value:
+        return None
+    return curr_sell_price
+
+def calculate_fair_value(message, best_buy_price, best_sell_price):
+    if message["symbol"] == "BOND":
+        return 1000
+    if best_buy_price and best_sell_price:
+        return (best_buy_price + best_sell_price) / 2
+    return best_buy_price or best_sell_price
+    
+
+def maybe_trade_symbol(message, exchange, symbol):
+    fair_value = symbol_dict[symbol]["fair_value"]
+    best_buy_price = symbol_dict[symbol]["best_buy_price"]
+    best_buy_price_size = symbol_dict[symbol]["best_buy_price_size"]
+    best_sell_price = symbol_dict[symbol]["best_sell_price"]
+    best_sell_price_size = symbol_dict[symbol]["best_sell_price_size"]
+
+    curr_buy_price = getCurrentBuyPrice(best_sell_price, fair_value)
+    curr_sell_price = getCurrentSellPrice(best_buy_price, fair_value)
+
+    if best_sell_price and curr_buy_price and best_sell_price < fair_value: # person willing to sell bond for less than fair value
+        order_id = global_variables["order_id"]
+        print(f"Order ID {order_id}: buying at {curr_buy_price} at size of {best_sell_price_size}")
+        exchange.send_add_message(global_variables["order_id"], symbol=symbol, dir=Dir.BUY, price=curr_buy_price, size=best_sell_price_size)
+        position_dict[symbol] += best_sell_price_size
+        global_variables["order_id"] += 1
+    elif best_buy_price and curr_sell_price and best_buy_price > fair_value and position_dict[symbol] > -risk_limit_dict[symbol]: # sell if someone is willing to buy for more than fair value
+        order_id = global_variables["order_id"]
+        print(f"Order ID {order_id}: selling at {curr_sell_price} at size of {best_buy_price_size}")
+        exchange.send_add_message(global_variables["order_id"], symbol=symbol, dir=Dir.SELL, price=curr_sell_price, size=best_buy_price_size)
+        position_dict[symbol] -= best_buy_price_size
+        global_variables["order_id"] += 1
 
 def main():
     args = parse_arguments()
@@ -133,8 +179,6 @@ def main():
     # message. Sending a message in response to every exchange message will
     # cause a feedback loop where your bot's messages will quickly be
     # rate-limited and ignored. Please, don't do that!
-    order_id = 1
-
     while True:
         message = exchange.read_message()
 
@@ -156,26 +200,8 @@ def main():
         elif message["type"] == "book":
             update_symbol_dict_with_message(message)
             # Buy the bond if the fair_value < 1000
-            if (message["symbol"] == "BOND"):
-                def maybe_trade_bond(message, exchange):
-                    best_buy_price = symbol_dict["BOND"]["best_buy_price"]
-                    best_buy_price_size = symbol_dict["BOND"]["best_buy_price_size"]
-                    best_sell_price = symbol_dict["BOND"]["best_sell_price"]
-                    best_sell_price_size = symbol_dict["BOND"]["best_sell_price_size"]
-                    curr_buy_price = getCurrentBuyPrice(best_sell_price, bond_fair_value)
-                    curr_sell_price = getCurrentBuyPrice(best_buy_price, bond_fair_value)
-                    nonlocal order_id
-                    if best_sell_price and best_sell_price < bond_fair_value: # person willing to sell bond for less than fair value
-                        print(f"Order ID {order_id}: buying at {curr_buy_price} at size of {best_sell_price_size}")
-                        exchange.send_add_message(order_id, symbol="BOND", dir=Dir.BUY, price=curr_buy_price, size=best_sell_price_size)
-                        position_dict["BOND"] += best_sell_price_size
-                        order_id += 1
-                    elif best_buy_price and best_buy_price > bond_fair_value and position_dict["BOND"] > -risk_limit_dict["BOND"]: # sell if someone is willing to buy for more than fair value
-                        print(f"Order ID {order_id}: selling at {curr_sell_price} at size of {best_buy_price_size}")
-                        exchange.send_add_message(order_id, symbol="BOND", dir=Dir.SELL, price=curr_sell_price, size=best_buy_price_size)
-                        position_dict["BOND"] -= best_buy_price_size
-                        order_id += 1
-                maybe_trade_bond(message, exchange)
+            if message["symbol"] == "BOND":
+                maybe_trade_symbol(message, exchange, message["symbol"])
 
 
 
