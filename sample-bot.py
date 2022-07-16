@@ -13,7 +13,7 @@ import json
 
 # ~~~~~============== CONFIGURATION  ==============~~~~~
 # Replace "REPLACEME" with your team name!
-team_name = "Pile Perch"
+team_name = "PILEPERCH"
 
 # ~~~~~============== MAIN LOOP ==============~~~~~
 
@@ -26,6 +26,56 @@ team_name = "Pile Perch"
 # code is intended to be a working example, but it needs some improvement
 # before it will start making good trades!
 
+symbol_dict = {}
+
+def update_symbol_dict(symbol, bid_price, ask_price, fair_value, best_buy_price_size, best_sell_price_size):
+    now = time.time()
+    if now > vale_last_print_time + 1:
+        vale_last_print_time = now
+        print(
+            {
+                f"{symbol}_bid_price": bid_price,
+                f"{symbol}_ask_price": ask_price,
+            }
+        )
+    if symbol not in symbol_dict:
+        symbol_dict[symbol] = {
+            "bid_price": bid_price, 
+            "ask_price": ask_price, 
+            'ts' : now, 
+            'fair_value' : fair_value,
+            'best_buy_price_size' : best_buy_price_size,
+            'best_sell_price_size' : best_sell_price_size
+            }
+    else:
+        symbol_dict[symbol]["ts"] = now
+        symbol_dict[symbol]["bid_price"] = bid_price
+        symbol_dict[symbol]["ask_price"] = ask_price
+        symbol_dict[symbol]["fair_value"] = fair_value
+        symbol_dict[symbol]["best_buy_price_size"] = best_buy_price_size
+        symbol_dict[symbol]["best_sell_price_size"] = best_sell_price_size
+    
+
+def update_symbol_dict_with_message(message):
+    def best_price(side):
+        if message[side]:
+            return message[side][0][0]
+    def best_price_size(side):
+        if message[side]:
+            return message[side][0][1]
+
+    fair_value = (best_price("buy") + best_price("sell")) / 2
+    best_buy_price = best_price("buy")
+    best_sell_price = best_price("sell")
+    best_buy_price_size = best_price_size("buy")
+    best_sell_price_size = best_price_size("sell")
+    update_symbol_dict(message['symbol'], best_buy_price, best_sell_price, fair_value, best_buy_price_size, best_sell_price_size)
+
+def maybe_buy_bond(message, exchange):
+    best_buy_price = symbol_dict["BOND"]["best_buy_price"]
+    best_buy_price_size = symbol_dict["BOND"]["best_buy_price_size"]
+    if best_buy_price < 1000 and message["symbol"] == "BOND":
+            exchange.send_add_message(order_id=1, symbol="BOND", dir=Dir.BUY, price=best_buy_price + 1, size=best_buy_price_size)
 
 def main():
     args = parse_arguments()
@@ -81,25 +131,11 @@ def main():
         elif message["type"] == "fill":
             print(message)
         elif message["type"] == "book":
-            if message["symbol"] == "VALE":
+            update_symbol_dict_with_message(message)
+            # Buy the bond if the fair_value < 1000
+            if (message["symbol"] == "BOND"):
+                maybe_buy_bond(message, exchange)
 
-                def best_price(side):
-                    if message[side]:
-                        return message[side][0][0]
-
-                vale_bid_price = best_price("buy")
-                vale_ask_price = best_price("sell")
-
-                now = time.time()
-
-                if now > vale_last_print_time + 1:
-                    vale_last_print_time = now
-                    print(
-                        {
-                            "vale_bid_price": vale_bid_price,
-                            "vale_ask_price": vale_ask_price,
-                        }
-                    )
 
 
 # ~~~~~============== PROVIDED CODE ==============~~~~~
