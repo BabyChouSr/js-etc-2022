@@ -10,6 +10,8 @@ from enum import Enum
 import time
 import socket
 import json
+import math
+import random
 
 # ~~~~~============== CONFIGURATION  ==============~~~~~
 # Replace "REPLACEME" with your team name!
@@ -48,6 +50,8 @@ risk_limit_dict = {
     "WFC" : 100,
     "XLF" : 100
 }
+
+outgoing_vale_orders = []
 
 def maybe_print_new_symbol_data(now, symbol, best_buy_price, best_sell_price):
     symbol_last_print_time = symbol_dict[symbol]["ts"] if symbol in symbol_dict else 0 
@@ -128,18 +132,101 @@ def calculate_fair_value(message, best_buy_price, best_sell_price):
 def check_arb(symbol_x, symbol_y, size_x, size_y, conversion_cost, exchange):
     if symbol_x not in symbol_dict or symbol_y not in symbol_dict:
         return False
+    if symbol_dict[symbol_y]["best_buy_price"] is None or symbol_dict[symbol_x]["best_sell_price"] is None:
+        return False
     # arb based on size
     # if symbol_dict[symbol_y]["best_buy_price"] * size_y > symbol_dict[symbol_x]["best_sell_price"] * size_x + conversion_cost:
     if symbol_dict[symbol_y]["best_buy_price"] > symbol_dict[symbol_x]["best_sell_price"] + conversion_cost:
         # TODO(chris): buy symbol y and convert and sell symbol x 
         #              more liquidity means that price is more accurate - probably hold more liquid symbol
-        exchange.send_convert_message(global_variables["order_id"], symbol=symbol_y, dir=Dir.BUY, size = 1)
-        print(f"Sent convert buy order for {symbol_x} at a size of {size_x}")
+        exchange.send_add_message(global_variables["order_id"], symbol=symbol_x, dir=Dir.BUY, price=symbol_dict[symbol_x]["best_sell_price"], size = size_x) # buy vale
         global_variables["order_id"] += 1
-        exchange.send_add_message(global_variables["order_id"], symbol=symbol_y, dir=Dir.SELL, price=symbol_dict[symbol_y]["best_buy_price"], size=1)
-        print(f"Sent convert sell order for {symbol_x} at a size of {size_x}")
+        print(f"Sent buy order for {symbol_x} at a size of {size_x}")
+        exchange.send_convert_message(global_variables["order_id"], symbol=symbol_x, dir=Dir.SELL, size = size_x) # convert vale -> valbz
+        print(f"Sent convert order for {symbol_x} to {symbol_y} at a size of {size_x}")
         global_variables["order_id"] += 1
+        exchange.send_add_message(global_variables["order_id"], symbol=symbol_y, dir=Dir.SELL, price=symbol_dict[symbol_y]["best_buy_price"], size=size_x) # sell valbz
+        print(f"Sent sell order for {symbol_y} at a size of {size_x}")
+        global_variables["order_id"] += 1
+
+def check_buy_price_exists(lst):
+    for item in lst:
+        if item not in symbol_dict or symbol_dict[item]["best_buy_price"] is None:
+            return False
+    return True
+
+def check_spread_exists(lst):
+    for item in lst:
+        if item not in symbol_dict or symbol_dict[item]["best_buy_price"] is None or symbol_dict[item]["best_sell_price"] is None:
+            return False
+    return True
+
+
+def xlf_to_basket(size, conversion_cost, exchange):    
+    if not check_buy_price_exists(["BOND", "GS", "MS", "WFC"]):
+        return False
     
+    if symbol_dict["XLF"]["best_sell_price"] is None:
+        return False
+
+    weighted_sum = 3 * symbol_dict["BOND"]["best_buy_price"] + 2 * symbol_dict["GS"]["best_buy_price"] + 3 * symbol_dict["MS"]["best_buy_price"] + 2 * symbol_dict["WFC"]["best_buy_price"]
+    weighted_sum /= 10
+    print("Weighted_sum: ", weighted_sum * size)
+    print("xlf best sell price: ", symbol_dict["XLF"]["best_sell_price"] * size + conversion_cost)
+    if symbol_dict["XLF"]["best_sell_price"] * size + conversion_cost < weighted_sum * size:
+        # TODO(chris): fix the sizing
+        exchange.send_add_message(global_variables["order_id"], symbol="XLF", dir=Dir.BUY, price = symbol_dict["XLF"]["best_sell_price"], size = size)
+        global_variables["order_id"] += 1
+        exchange.send_convert_message(global_variables["order_id"], symbol="XLF", dir=Dir.SELL, size = size)
+        print(f"Sent convert buy order for {'XLF'} at a size of {size}")
+        global_variables["order_id"] += 1
+        exchange.send_add_message(global_variables["order_id"], symbol="BOND", dir=Dir.SELL, price=symbol_dict["BOND"]["best_buy_price"], size=int(size * 0.3))
+        print(f"Sent convert sell order for {'BOND'} at a size of {int(size * 0.3)}")
+        exchange.send_add_message(global_variables["order_id"], symbol="GS", dir=Dir.SELL, price=symbol_dict["GS"]["best_buy_price"], size=int(size * 0.2))
+        print(f"Sent convert sell order for {'GS'} at a size of {int(size * 0.2)}")
+        exchange.send_add_message(global_variables["order_id"], symbol="MS", dir=Dir.SELL, price=symbol_dict["MS"]["best_buy_price"], size=int(size * 0.3))
+        print(f"Sent convert sell order for {'MS'} at a size of {int(size * 0.3)}")
+        exchange.send_add_message(global_variables["order_id"], symbol="WFC", dir=Dir.SELL, price=symbol_dict["WFC"]["best_buy_price"], size=int(size * 0.2))
+        print(f"Sent convert sell order for {'WFC'} at a size of {int(size * 0.2)}")
+        global_variables["order_id"] += 1
+
+def initiate_bid_ask_arb(symbol_ll, symbol_ml, exchange):
+    if not check_spread_exists([symbol_ll, symbol_ml]):
+        return False
+    if symbol_dict[symbol_ll]["best_sell_price"] > symbol_dict[symbol_ml]["best_sell_price"] and symbol_dict[symbol_ll]["best_buy_price"] < symbol_dict[symbol_ml]["best_buy_price"] and position_dict[symbol_ll] < risk_limit_dict[symbol_ll]:
+        for i in range(5):
+            exchange.send_add_message(global_variables["order_id"], symbol=symbol_ll, dir=Dir.BUY, price=symbol_dict[symbol_ll]["best_buy_price"] + random.randint(1, symbol_dict[symbol_ml]["best_buy_price"] - symbol_dict[symbol_ll]["best_buy_price"]), size=1)
+            outgoing_vale_orders.append(global_variables["order_id"])
+            global_variables["order_id"] += 1
+            print(f"Sent buy order for {'VALE'} at a size of {1}")
+        return True
+
+def finish_bid_ask_arb(symbol_ll, symbol_ml, exchange):
+    if not check_buy_price_exists([symbol_ml]):
+        return False
+
+    print(f"Finishing bid ask arb for {symbol_ll} to {symbol_ml}")
+    exchange.send_convert_message(global_variables["order_id"], symbol=symbol_ll, dir=Dir.SELL, size = 1) # convert vale -> valbz
+    global_variables["order_id"] += 1
+    exchange.send_add_message(global_variables["order_id"], symbol=symbol_ml, dir=Dir.SELL, price=symbol_dict[symbol_ml]["best_buy_price"], size=1)
+    global_variables["order_id"] += 1
+
+def maybe_buy_symbol(best_sell_price, curr_buy_price, fair_value, best_sell_price_size, exchange, symbol):
+    if best_sell_price and curr_buy_price and best_sell_price < fair_value and position_dict[symbol] + best_sell_price_size < risk_limit_dict[symbol]: # person willing to sell bond for less than fair value
+        order_id = global_variables["order_id"]
+        print(f"Order ID {order_id}: buying at {curr_buy_price} at size of {best_sell_price_size}")
+        exchange.send_add_message(global_variables["order_id"], symbol=symbol, dir=Dir.BUY, price=curr_buy_price, size=best_sell_price_size)
+        position_dict[symbol] += best_sell_price_size
+        global_variables["order_id"] += 1
+
+def maybe_sell_symbol(best_buy_price, curr_sell_price, fair_value, best_buy_price_size, exchange, symbol):
+    if best_buy_price and curr_sell_price and best_buy_price > fair_value and position_dict[symbol] - best_buy_price_size > -risk_limit_dict[symbol]: # sell if someone is willing to buy for more than fair value
+        order_id = global_variables["order_id"]
+        print(f"Order ID {order_id}: selling at {curr_sell_price} at size of {best_buy_price_size}")
+        exchange.send_add_message(global_variables["order_id"], symbol=symbol, dir=Dir.SELL, price=curr_sell_price, size=best_buy_price_size)
+        position_dict[symbol] -= best_buy_price_size
+        global_variables["order_id"] += 1
+
 def maybe_trade_symbol(message, exchange, symbol):
     fair_value = symbol_dict[symbol]["fair_value"]
     best_buy_price = symbol_dict[symbol]["best_buy_price"]
@@ -149,25 +236,24 @@ def maybe_trade_symbol(message, exchange, symbol):
 
     curr_buy_price = getCurrentBuyPrice(best_sell_price, fair_value)
     curr_sell_price = getCurrentSellPrice(best_buy_price, fair_value)
-
+        
     # Normal buying
-    if best_sell_price and curr_buy_price and best_sell_price < fair_value and position_dict[symbol] + best_sell_price_size < risk_limit_dict[symbol]: # person willing to sell bond for less than fair value
-        order_id = global_variables["order_id"]
-        print(f"Order ID {order_id}: buying at {curr_buy_price} at size of {best_sell_price_size}")
-        exchange.send_add_message(global_variables["order_id"], symbol=symbol, dir=Dir.BUY, price=curr_buy_price, size=best_sell_price_size)
-        position_dict[symbol] += best_sell_price_size
-        global_variables["order_id"] += 1
+    maybe_buy_symbol(best_sell_price, curr_buy_price, fair_value, best_sell_price_size, exchange, symbol)
     # Normal selling 
-    if best_buy_price and curr_sell_price and best_buy_price > fair_value and position_dict[symbol] - best_buy_price_size > -risk_limit_dict[symbol]: # sell if someone is willing to buy for more than fair value
-        order_id = global_variables["order_id"]
-        print(f"Order ID {order_id}: selling at {curr_sell_price} at size of {best_buy_price_size}")
-        exchange.send_add_message(global_variables["order_id"], symbol=symbol, dir=Dir.SELL, price=curr_sell_price, size=best_buy_price_size)
-        position_dict[symbol] -= best_buy_price_size
-        global_variables["order_id"] += 1
+    maybe_sell_symbol(best_buy_price, curr_sell_price, fair_value, best_buy_price_size, exchange, symbol)
     # Checking arbitrarge opportunities
     if message["symbol"] == "VALE":
         if "VALBZ" in symbol_dict:
             check_arb("VALE", "VALBZ", best_buy_price_size, symbol_dict["VALBZ"]["best_sell_price_size"], 10, exchange)
+    if message["symbol"] == "VALBZ":
+        if "VALE" in symbol_dict:
+            check_arb("VALBZ", "VALE", best_buy_price_size, symbol_dict["VALE"]["best_sell_price_size"], 10, exchange)
+    if message["symbol"] == "XLF":
+        if best_sell_price_size:
+            xlf_to_basket(math.ceil(best_sell_price_size/10)*10, 100, exchange)
+
+    # Hold less liquid positions
+    initiate_bid_ask_arb("VALE", "VALBZ", exchange)
 
 def main():
     args = parse_arguments()
@@ -204,6 +290,7 @@ def main():
     # message. Sending a message in response to every exchange message will
     # cause a feedback loop where your bot's messages will quickly be
     # rate-limited and ignored. Please, don't do that!
+    trade_set = ["BOND", "VALE", "XLF", "GS", "MS", "WFC"]
     while True:
         message = exchange.read_message()
 
@@ -225,10 +312,14 @@ def main():
         elif message["type"] == "book":
             update_symbol_dict_with_message(message)
             # Buy the bond if the fair_value < 1000
-            if message["symbol"] == "BOND":
+            if message["symbol"] in trade_set:
                 maybe_trade_symbol(message, exchange, message["symbol"])
-            if message["symbol"] == "VALE":
-                maybe_trade_symbol(message, exchange, message["symbol"])
+        elif message["type"] == "out":
+            print(message)
+            if message["order_id"] in outgoing_vale_orders:
+                position_dict["VALE"] += 1
+                finish_bid_ask_arb("VALE", "VALBZ", exchange)
+                outgoing_vale_orders.remove(message["order_id"])            
 
 
 # ~~~~~============== PROVIDED CODE ==============~~~~~
